@@ -1,0 +1,8 @@
+mode=EXHAUSTIVE
+debug=ON
+#SEED=77f5
+#SEED=ddb3
+SEED=279D
+#cachedData=ON
+gem server path=../GEM/src/gem-server.rkt
+api path=.mcapi.fspec.rktd

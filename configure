@@ -1,0 +1,75 @@
+#! /bin/bash
+# Checks dependencies for FSpec tool suite.
+# It doesn't do much to really configure, just complain if something is missing.
+
+JAVAC=$(which javac)
+if [ -z "$JAVAC" ]; then
+	echo The Java SDK is required in order to compile and run the FSpec Compiler
+	echo Download and install the appropriate version for your platform from http://java.sun.com or through your favorite package system.
+	echo If you already have it installed, make sure it is in your path.
+	exit 2
+fi
+
+RACKET=$(which racket)
+if [ -z "$RACKET" ]; then
+	echo Racket is required in order to run the FSpec model
+	echo "Download and install the appropriate version for your platform from http://www.racket-lang.org"
+	echo If you already have it installed, make sure it is in your path.
+	exit 3
+else
+	#Also need racket to be at /usr/bin/racket
+	if [ ! -e "/usr/bin/racket" ]; then
+		echo "The GEM expects Racket to be at /usr/bin/racket.  Installing symlink..."
+		if sudo ln -s `which racket` /usr/bin/racket; then non=nop
+		else
+			echo Sudo not found, are you on Windows?
+			#if ln -s `which racket` /usr/bin/racket.exe; then nop=nop
+			#else
+			#	echo "Couldn't make link to racket ..."
+			#	exit 3
+			#fi
+		fi
+	fi
+	
+	#Check for all the racket programs we use: racket, gracket, raco
+	GRACKET=$(which gracket)
+	if [ -z "$GRACKET" ]; then
+		echo "Missing Racket graphical launcher 'gracket'. Please make sure this is in your path."
+		exit 4
+	fi
+	RACO=$(which raco)
+	if [ -z "$RACO" ]; then
+		echo "Missing Racket build tool 'raco'. Please make sure this is in your path."
+		exit 5
+	fi
+fi
+
+PHP=$(which php)
+if [ -z "$PHP" ]; then
+	echo PHP is required in order to run the fsrun scenario tool
+	echo "Download and install the appropriate version for your platform from http://www.php.net (or possibly through cygwin for Windows)"
+	echo If you already have it installed, make sure it is in your path.
+	exit 6
+else
+	#Also need php to be at /usr/bin/php
+	if [ ! -e /usr/bin/php ]; then
+		echo "The Scenario runner (fsrun) expects PHP to be at /usr/bin/php.  Installing symlink..."
+		if sudo ln -s `which php` /usr/bin/php; then nop=nop
+		else
+			echo Sudo not found, are you on Windows?
+			#EXE=${PHP##.}
+			#echo exe=$EXE
+			#if [ ! -z "$EXE" ]; then
+			#	PHP=${PHP%.}
+			#fi
+			#echo php=$PHP
+			
+			if ln -s "$PHP" /usr/bin/; then nop=nop
+			else
+				echo "Couldn't make link to php. Either manually create /usr/bin/php or update bin/fsrun to point to the right PHP executable"
+				exit 3
+			fi
+		fi
+	fi
+fi
+

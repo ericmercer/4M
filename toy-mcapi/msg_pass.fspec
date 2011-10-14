@@ -1,0 +1,53 @@
+state
+ mailboxes = {}
+ queues = 0
+end
+transition mbox
+ input id, statusAddr, resultAddr
+ rule
+  true ==>
+   tmp newAddr;
+   @resultAddr' := newAddr;
+   mailboxes' := mailboxes \U {[id, newAddr]};
+   @statusAddr' := 1;
+  end
+ errors
+  (\E box in mailboxes: box.0 = id) ==>
+   @statusAddr' := -1;
+ end
+end
+transition get_mbox
+ input id, resultAddr
+ rule
+  (\E box in mailboxes: box.0 = id) ==>
+   let mailbox = (box in mailboxes: box.0 = id);
+   @resultAddr' := mailbox.1;
+ end
+end
+transition send
+ input from, msg, to
+ rule
+  true ==>
+   queues' := [from, queues];
+   @from' := [@msg, to, @from];
+ end
+end
+transition recv
+ input to, msg
+ rule
+  @to != 0 ==>
+   @msg' := (@to).0;
+   @to' := (@to).1;
+ end
+end
+daemon pump
+ rule
+  queues != 0 ==>
+   let from = queues.0;
+   let msg = (@from).0;
+   let to = (@from).1;
+   @to' := [msg, @to];
+   @from' := (@from).2;
+   queues' := queues.1;
+ end
+end

@@ -1,0 +1,56 @@
+#! /bin/bash
+
+## USAGE: Type fspecc -h to see help
+## CONFIG: You may want to comment out the part to check for uname and just manually configure
+##         the 'sep' variable.
+##         Also, you can enter paths directly as needed.
+
+
+#http://www.ufoot.org/more/howto/bashbasename
+dirname()
+{
+  #Truncate the filename part, which is found by skipping all "/" chars in string
+  #${1} is first arg, ${1#*/} means remove up to first slash, ${1##*/} means remove
+  #up to last slash (remove all slashes).  ${1%x} means truncate after last x (first
+  #x found comming from the end).  So all together means truncate the filename.
+  local dir="${1%${1##*/}}"
+  
+  #Inside fsrun on Windows the directory includes the script name!
+  dir=${dir%fspecc}
+  
+  #Default to ./, Then truncate last char (the %? part) unless the path is just "/"
+  #in which case we need to keep it. 
+  #"${dir:=./}" != "/" && dir="${dir%?}"
+  #The line above will try to execute $dir, which errors because it is a dir. Below is better
+  
+  if [ "${dir:=./}" != "/" ] ; then
+    dir=${dir%?}
+  fi
+
+  #Return value by echo-ing it.
+  echo "$dir"
+}
+
+
+#Determine the path to this script file, so we can build correct paths.
+#Dr. Mercer's MinGW setup does not have dirname, so override the cmd with a function
+toself=$(dirname $0)
+
+#MinGW tries to translate Unix paths when invoking a Windows exe (like Java),
+# but it fails to convert ":" to ";", since ":" might be a drive letter name
+# which MinGW interprets specially. So we have to manually convert.
+# 
+# CONFIG: comment this out and set 'sep' manually if the uname is not working.
+# 
+os=`uname -s`
+if [ ${os:0:5} == "MINGW" ]; then
+    sep=\;
+else
+    sep=:
+fi
+
+classpath="$toself/../obj$sep$toself/../lib/antlr-runtime-3.2.jar"
+
+#echo Path to self is $toself
+echo java -cp "$classpath" fspecc.FSpecCompiler $@
+java -cp "$classpath" compiler.FSpecCompiler $@

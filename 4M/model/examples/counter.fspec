@@ -1,0 +1,24 @@
+state
+	counter = 0		# The only state needed for this Inc/Dec example
+end
+
+transition inc
+	rule
+		true ==> counter' := counter + 1;
+	end
+end
+
+transition dec
+	rule
+		true ==> counter' := counter - 1;
+	end
+end
+
+transition get
+	input ResultAddr
+	rule
+		ResultAddr != ERROR ==>
+			@ResultAddr' := counter;
+	end
+end
+

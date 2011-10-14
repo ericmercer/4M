@@ -1,0 +1,909 @@
+(#	
+ #	MCAPI subset.  This is just to get a send-recv to work.
+ #	
+ #	Notes (8/11/10):
+ #	- Such-that uses "choose" in the model, which gives the first thing in the set, not a random one
+ #	  although we really need to select a random request to handle all cases in the semantics.
+ #	  -> POSSIBLY NEED "CHOOSE" TO BE NON_DETERMINISTIC !!
+ #		- I asked Jay about this.  We'd have to change the Redex model to allow primitive ops to 
+ #		  return a list of possibilities, then change the expr reductions and how things interact
+ #		  with them to handle that.  -- still seeing if I need this change...
+ #	- If "choose" did give a random one, we'd have no way to make sure we got the SAME random one 
+ #	  everywhere in the transition, since let Req = (r in Requests : true) would textually sub that 
+ #	  in so each case (error rules, success rule guard, each update in the effect) would have a 
+ #	  possibly-different random request.
+ #	  -> NEED FSPEC LANG CHANGE !! -> let macros become local bindings in the transition.
+ #	- Optional: Facilitate list manipulation with new operators:
+ #	  - value >> Tuple #push
+ #	  - << Tuple	   #pop (deleteFirst)
+ #	  - Tuple << value #append
+ #	  This is optional because I can implement it in FSpec, just see the fifo_... functions.
+ #	- Set-Build needs to be able to construct elements, not just find them.  As in:
+ #		{ [id, "Canceled", data] : [id, "Pending", data] \in Requests }
+ #	  A work-around would be to have a transition that was repeatedly called to change 1 pending to 
+ #	  canceled at a time.  That would work in MCAPI's case.  It needs the let-macro -> trans-let 
+ #	  change though.
+ #
+ 	Notes (8/12/10):
+	- Update semantics of "ret" cmd to clear out temporaries created during the call.
+		- So also update "alloc" cmd to somehow indicate which are the temporaries... or update
+		  eta so we can tell ... or something. Well, any variable in eta that isn't in the param 
+		  list of the current transition (update "ret" to indicate this) should be garbage collected
+		  if it is an address into sigma. (Can't GC all such pointers, because some come in via 
+		  params.)
+		- This could be an option, since sometimes we want to see the temporaries in sigma for 
+		  debugging an API spec.
+	- Hmm, a set comprehension usually involves constructing a set, not just filtering a set. So,
+	  we can have setFilter be the current setBuild, and have setBuild be:
+	  	(setBuild (pattern in (const-set v...)) e)
+	  where e is used to build new elements, not to check for inclusion.  So:
+		let pending = (setFilter (x in Requests) (= (vecref x 2) "Pending"))
+	  	let canceled = (setBuild ((tuple type id status valid creator data) in pending) 
+	  					   (tuple type id "Canceled" valid creator data))
+	  	So, how does this look in FSpec full?  { pattern in uod : predicate } vs. 
+	  	{| pattern in uod : constructor |} ?? Or { |constructor| pattern in uod : predicate }? So,
+	  		{ |[id, type, "Canceled", valid, creator, data]| 
+	  		  [id, type, status, valid, creator, data] in Requests : status = "Pending" }
+	  That's not too bad, right?  Could also use some previously constructed set as UoD on setBuild,
+	  and give true as the predicate.  Note that the syntax is:
+	  	'{' ('|' cons=expr '|')? pat=sym_expr 'in' uod=expr ':' pred=expr '}'
+	  And desugaring will convert this to a setBuild with nested setFilter, or just setBuild if 
+	  pred is "true", or just setFilter if cons is not given.
+	- Still need transition-level let, vs. textual replacement, b/c choose needs to be non-det and 
+	  pick just one to use in the rest of the transition.
+ #	
+ #	Conventions / Implementation:
+ #	- I'm using camel-case (first letter capitol) for parameters, camel-case (first-letter lower)
+ #	  for local bindings (like in patterns) (makes it easier to use the same name to match pieces
+ #	  of data structures).  I'm using type abbreviation + underscore + field as accessor functions,
+ #	  camel-case (lower first) for helper functions (like getNode), and the MCAPI names are all 
+ #	  lower snake case.
+ #	- I'm just using strings like "MCAPI_SUCCESS" as the constant named MCAPI_SUCCESS
+ #	- I use functions to define accessors, initializers, and helpers for all the data structures
+ #	  defined in the state, rather than duplicating such-that and vec-ref expressions all over.
+ #	- Any input that is a pointer in the C MCAPI spec ends in Addr.
+ #)
+
+
+
+### API STATE ###
+
+state
+	
+	#Note: Implementing a map as a set of tuples where the first value of the tuple is the key.
+
+	(##
+	 # Map of Node -> NodeId
+	 #)
+	ActiveNodes = {}
+
+	(##
+	 # Set of [NodeId, PortId, EndpointId]
+	 #)
+	Endpoints = {}
+	
+	(##
+	 # Set of [SenderEp, DestinationEp, EndpointId]
+     #
+	 # Messages is a FIFO queue as a linked list, used to ensure message non-overtaking.
+	 # Note that placing this here means deleting an endpoint DELETES ALL MESSAGES for
+	 # that endpoint, which is not clear in the spec (and is one of our Qs).
+     # The Messages queue is used for OUTGOING messages ONLY.
+	 #)
+    MsgQueues = {}
+    
+	(##
+	 # Set of [EndpointId, AttrNum, value]
+	 #)
+	AssignedAttributes = {}
+
+	(##	
+	 # Set of [RequestType, RequestId, Status, Valid, CreatorNode, Data] where Data is a tuple 
+	 # specific to the type.
+	 # 
+	 # Possible values in the tuples:
+	 #		enum RequestType = "msg_send", "msg_recv", "msg_deliver", "get_endpoint"
+	 #		enum Status = "Pending", "Complete", "Cancelled"
+	 #)
+	Requests = {}
+	
+	
+	# Sets/Variables used in definitions
+	_LibraryVersion = 1
+	
+	# Error set when we can't actually return an error
+	ErrorStatus = false
+end
+
+## Data Structure functions ##
+
+function getNodeId(Node)
+	([node, nodeId] in ActiveNodes : node = Node).1
+end
+function getNode(NodeId)
+	([node, nodeId] in ActiveNodes : nodeId = NodeId).0
+end
+
+function getEndpoint(EpId)
+	(ep in Endpoints : ep_id(ep) = EpId )
+end
+function ep_node_id(Ep) Ep.0 end
+function ep_port(Ep)	Ep.1 end
+function ep_id(Ep)	  Ep.2 end
+function newEndpoint(NodeId, Port)
+	[NodeId, Port, getMaxEndpointId() + 1]
+end
+function getMaxEndpointId()
+	if Endpoints = {} then
+		-1
+	else
+		ep_id( (ep in Endpoints : (\A ep2 in Endpoints : ep_id(ep) >= ep_id(ep2) )) )
+	fi
+end
+
+function getRequest(ReqId)
+	(req in Requests : req_id(req) = ReqId) #old FSpec had /\ valid = true
+end
+function req_type(Req)	Req.0 end
+function req_id(Req)	  Req.1 end
+function req_status(Req)  Req.2 end
+function req_valid(Req)   Req.3 end
+function req_creator(Req) Req.4 end
+function req_data(Req)	Req.5 end
+function newRequest(Type, CreatorNode, Data)
+	[Type, getMaxRequestId() + 1, "Pending", true, CreatorNode, Data]
+end
+function getMaxRequestId()
+	if Requests = {} then
+		-1
+	else
+		req_id( (req in Requests : (\A req2 in Requests : req_id(req) >= req_id(req2) )) )
+	fi
+end
+#function getPendingRequest(Type)
+#	(req in Requests : req_valid(req) = true /\ req_status(req) = "Pending" /\ req_type(req) = Type)
+#end
+#function hasPendingRequest(Type)
+#	(\E req in Requests : req_valid(req) = true /\ req_status(req) = "Pending" /\ 
+#			req_type(req) = Type)
+#end
+function hasRequest(ReqId)
+	(\E req in Requests : req_id(req) = ReqId) #old FSpec had /\ valid = true
+end
+
+
+function getMsgQ(sendEp, recvEp)
+    if {q in MsgQueues : q.0 = sendEp /\ q.1 = recvEp} = {} then
+        [ sendEp, recvEp, fifo_empty() ]
+    else
+        (q in MsgQueues : q.0 = sendEp /\ q.1 = recvEp)
+    fi
+end
+function changeMsgQ(q, newList)
+	[q.0, q.1, newList]
+end
+function changeEpQueue(ep, newq)
+	[ep.0, ep.1, ep.2, newq]
+end
+function msgQ_msgs(q) q.2 end
+
+function fifo_empty()
+	#map of index=>value, min-index, max-index
+	[{}, 0, -1]
+end
+function fifo_add(lst, value)
+	#speed improvement, when list is some large expr
+	#Also note: macro expander does not respect variables defined by let.  So let list = list in ...
+	#does not work!
+	#Alt. way to do function macro insertion: add a let stmt around expr for each param, instead of 
+	# manually replacing copies in the expr ...
+	
+	let list = lst in
+		[list.0 \U {[list.2 + 1, value]}, list.1, list.2 + 1]
+end
+function fifo_hasNext(lst)
+	let list = lst in
+		list.1 <= list.2
+end
+function fifo_next(lst)
+	let list = lst in
+		(pair in list.0 : pair.0 = list.1).1
+end
+function fifo_remove(lst)
+	let list = lst in
+		if fifo_hasNext(list) then
+			[list.0 \ {pair in list.0 : pair.0 = list.1}, list.1 + 1, list.2]
+		else
+			list
+		fi
+end
+
+function min(a, b)
+	if a < b then a else b fi
+end
+
+### MCAPI CALLS ###
+
+
+## INITIALIZATION
+
+transition initialize
+	input Node, NodeId, VersionAddr, StatusAddr
+	
+	rule
+		true ==>
+			@StatusAddr' := "MCAPI_SUCCESS";
+			@VersionAddr' := _LibraryVersion;
+			ActiveNodes' := ActiveNodes \U {[Node, NodeId]};
+	end
+	
+	errors
+		false (#could not initialize#) ==>
+			@StatusAddr' := "MCAPI_ENO_INIT";
+		
+		ValidStatusParam(StatusAddr) /\
+		(\E [n, nid] in ActiveNodes : n = Node ) ==>
+			@StatusAddr' := "MCAPI_INITIALIZED";
+		
+		ValidStatusParam(StatusAddr) /\
+		(!ValidNode(Node) \/ (\E [n, nid] in ActiveNodes : nid = NodeId )) ==>
+			@StatusAddr' := "MCAPI_ENODE_NOTVALID";
+		
+		ValidStatusParam(StatusAddr) /\
+		!ValidVersionParam(VersionAddr) ==>
+			@StatusAddr' := "MCAPI_EPARAM";
+		
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+	end
+	
+end
+function ValidStatusParam(StatusAddr)
+	ValidAddr(StatusAddr)
+end
+function ValidVersionParam(VersionAddr)
+	ValidAddr(StatusAddr)
+end
+function ValidAddr(Addr)
+	#If FSpec supported it, could be: typeof(Addr) = "address" /\ Addr != @0
+	typeof(Addr) = "address"
+end
+function ValidNode(Node)
+	true #whatever we're using as node identifiers, just accept it
+end
+function ValidRequestParam(RequestAddr)
+	ValidAddr(RequestAddr)
+end
+function ValidBufferParam(BufferAddr)
+	ValidAddr(BufferAddr)
+end
+
+
+transition finalize
+	input Node, StatusAddr
+
+	let pending = { req in Requests: req_status(req) = "Pending" /\ req_creator(req) = Node }
+	let nodeId = getNodeId(Node)
+	let canceled = { | [req_type(r), req_id(r), "Canceled", req_valid(r), req_creator(r), req_data(r)] |
+					 r in pending : true }
+	
+	rule
+		true ==>
+			ActiveNodes' := ActiveNodes \ { [node, nid] in ActiveNodes : node = Node };
+			@StatusAddr' := "MCAPI_SUCCESS";
+			# QUESTION:  Should this close all endpoints and cancel all messages?
+			# ANSWER: "they are undefined and cannot be used any longer" -- Jim
+			Endpoints' := Endpoints \ { ep in Endpoints : ep_node_id(ep) = nodeId };
+			Requests' := (Requests \ pending) \U canceled;
+	end
+	
+	errors
+		#Real implementations may fail to finalize for other reasons, but our model won't
+		ValidStatusParam(StatusAddr) /\
+		!(\E [node, nid] in ActiveNodes: node = Node) \/ false (#could not finalize#) ==>
+			@StatusAddr' := "MCAPI_ENO_FINAL";
+		
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+	end
+end
+
+transition get_node_id
+	input Node, StatusAddr, ResultAddr
+	
+	rule
+		true ==>
+			@ResultAddr' := getNodeId(Node);
+			@StatusAddr' := "MCAPI_SUCCESS";
+	end
+	
+	errors
+		ValidStatusParam(StatusAddr) /\
+		!(\E [node, nid] in ActiveNodes: node = Node) ==>
+			@StatusAddr' := "MCAPI_ENODE_NOTINIT";
+		
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+	end
+end
+
+## Endpoints
+
+transition create_endpoint
+	input Node, PortId, StatusAddr, ResultAddr
+	
+	rule 
+		true ==> 
+			@StatusAddr' := "MCAPI_SUCCESS";
+			Endpoints' := Endpoints \U {newEndpoint(getNodeId(Node), PortId)};
+			@ResultAddr' := getMaxEndpointId() + 1; #previous max + 1 is new EpId
+	end
+	
+	errors
+		ValidStatusParam(StatusAddr) /\
+		!ValidPortId(PortId) ==>
+			@StatusAddr' := "MCAPI_EPORT_NOTVALID";
+		
+		ValidStatusParam(StatusAddr) /\
+		(\E ep in Endpoints: [Node,ep_node_id(ep)] \in ActiveNodes /\ ep_port(ep) = PortId) ==>
+			@StatusAddr' := "MCAPI_EENDP_ISCREATED";
+		
+		ValidStatusParam(StatusAddr) /\
+		!(\E [node, nodeId] in ActiveNodes: node = Node) ==>
+			@StatusAddr' := "MCAPI_ENODE_NOTINIT";
+		
+		ValidStatusParam(StatusAddr) /\
+		false (# Max endpoints exceeded #) ==>
+			@StatusAddr' := "MCAPI_EENDP_LIMIT";
+		
+		#Sven says this can occur if the node was statically predefined for routing only, thus has 
+		#no ports, thus runtime endpoint creation would fail.
+		ValidStatusParam(StatusAddr) /\
+		false (# can't make endpoints on this node #) ==>
+			@StatusAddr' := "MCAPI_EEP_NOT_ALLOWED";
+			
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+	end	
+end
+function ValidPortId(PortId)
+	PortId >= 0
+end
+
+transition get_endpoint_i
+	input Node, NodeId, PortId, EndpointAddr, RequestAddr, StatusAddr
+	
+	rule 
+		true ==> 
+			Requests' := Requests \U {newRequest("get_endpoint", Node, 
+			   		[StatusAddr, NodeId, PortId, EndpointAddr])};
+			@RequestAddr' := getMaxRequestId() + 1;
+			@StatusAddr' := "MCAPI_SUCCESS";
+	end
+	
+	errors
+		ValidStatusParam(StatusAddr) /\
+		!ValidNodeId(NodeId) ==>
+			@StatusAddr' := "MCAPI_ENODE_NOTVALID";
+		
+		ValidStatusParam(StatusAddr) /\
+		!ValidPortId(PortId) ==>
+			@StatusAddr' := "MCAPI_EPORT_NOTVALID";
+		
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+	end
+	
+end
+function ValidNodeId(NodeId)
+	NodeId >= 0
+end
+#Note: Model the get_endpoint transition with get_endpoint_i + wait
+transition get_endpoint
+	input Node, NodeId, PortId, StatusAddr, ResultAddr
+	
+	let EndpointAddr = ResultAddr #it's the return value of this func. Make alias name for clarity.
+	
+	rule
+		true ==>
+			tmp RequestAddr;
+			tmp SizeAddr;
+			tmp Result2Addr;
+			call get_endpoint_i(Node, NodeId, PortId, EndpointAddr, RequestAddr, StatusAddr) {
+				@StatusAddr = "MCAPI_SUCCESS" ==>
+					call wait(Node, RequestAddr, SizeAddr, StatusAddr, 0(#timeout#), Result2Addr);
+				@StatusAddr != "MCAPI_SUCCESS" ==>
+					let noop = 0;
+			};
+	end
+end
+
+(#
+	Need to model the completion of the get endpoint operation, which must store information in the
+	EndpointAddr location.  The e.g. impl. uses int as mcapi_endpoint_t, so that means it uses some
+	unique endpoint id.
+#)
+daemon _finish_get_endpoint_i
+	
+	#List of all requests that can be finished now
+	let reqs = {req in Requests : 
+			#Select pending request
+			   req_valid(req) = true 
+			/\ req_status(req) = "Pending" 
+			/\ req_type(req) = "get_endpoint"
+			
+			#Rule Guard
+			/\ (\E ep in Endpoints : ep_node_id(ep) = req_data(req).1 /\ ep_port(ep) = req_data(req).2) 
+			}
+	
+	let EpAddr = req_data(req).3	 #this is a non-hygienic macro, so it WILL capture the value of req
+	let StatusAddr = req_data(req).0
+	
+	rule
+		reqs != {}
+		==>
+			choose req in reqs;
+			#let EpAddr = req_data(req).3;	#We SHOULD be forced to use this, but the non-hygienic macro works just fine.
+			#let StatusAddr = req_data(req).0;
+			@EpAddr' := ep_id( (ep in Endpoints : ep_node_id(ep) = req_data(req).1 /\ ep_port(ep) = req_data(req).2) );
+			Requests' := (Requests \ {req}) \U { [req.0, req.1, "Finished", req.3, req.4, req.5] };
+			@StatusAddr' := "MCAPI_SUCCESS";
+	end
+end
+
+transition delete_endpoint
+	input Node, Endpoint, StatusAddr
+
+	let endp = getEndpoint(Endpoint)
+	
+	rule
+		true ==>
+			Endpoints' := Endpoints \ {endp};
+			@StatusAddr' := "MCAPI_SUCCESS";
+	end
+	
+	errors
+		#if endp can't be found, then endp = ERROR since the de-set operation only succeeds if there's exactly 1 soln
+		ValidStatusParam(StatusAddr) /\
+		endp = ERROR ==>
+			@StatusAddr' := "MCAPI_ENOT_ENDP";
+			
+		#We aren't modelling channels...
+		#ValidStatusParam(StatusAddr) /\
+		#false ==>
+		#	@StatusAddr' := "MCAPI_ECHAN_OPEN";
+		
+		ValidStatusParam(StatusAddr) /\
+		getNode(ep_node_id(endp)) != Node ==>
+			@StatusAddr' := "MCAPI_ENOT_OWNER";
+		
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+	end
+end
+
+## Endpoint Attributes
+
+(#transition get_endpoint_attribute
+	input Node, Endpoint, AttributeNum, AttributeAddr, AttributeSize, StatusAddr
+	
+	let ExistingValue = {[eid, attrn, val] in AssignedAttributes: 
+			[eid, attrn, val] \in AssignedAttributes 
+			/\ eid = Endpoint
+			/\ attrn = AttributeNum}
+	
+	rule
+		true ==>
+			@AttributeAddr' := if ExistingValue = {} then 0 else ExistingValue fi;
+			@StatusAddr' := "MCAPI_SUCCESS";
+	end
+	
+	errors
+		ValidStatusParam(StatusAddr) /\
+		!ValidEndpointId(Endpoint) ==>
+			@StatusAddr' := "MCAPI_ENOT_ENDP";
+		
+		ValidStatusParam(StatusAddr) /\
+		false (#Unknown attribute number# ) ==>
+			@StatusAddr' := "MCAPI_EATTR_NUM";
+		
+		ValidStatusParam(StatusAddr) /\
+		false (#incorrect attribute size# ) ==>
+			@StatusAddr' := "MCAPI_EATTR_SIZE";
+		
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+	end
+	
+end#)
+function ValidEndpointId(EndpointId)
+	if EndpointId >= 0 
+	   /\ (\E ep in Endpoints : ep_id(ep) = EndpointId) 
+	then true 
+	else false fi
+end
+
+
+(#transition set_endpoint_attribute
+	input Node, Endpoint, AttributeNum, Attribute, AttributeSize, StatusAddr
+	
+	let ExistingValue = {[eid, attrn, val] in AssignedAttributes: 
+			[eid, attrn, val] \in AssignedAttributes 
+			/\ eid = Endpoint
+			/\ attrn = AttributeNum}
+	
+	rule
+		true ==>
+			AssignedAttributes' := (AssignedAttributes \ ExistingValue) \U {[Endpoint, AttributeNum, Attribute]};
+			@StatusAddr' := "MCAPI_SUCCESS";
+	end
+	
+	errors
+		ValidStatusParam(StatusAddr) /\
+		!ValidEndpointId(Endpoint) ==>
+			@StatusAddr' := "MCAPI_ENOT_ENDP";
+		
+		false (#Unknown attribute number# ) ==>
+			@StatusAddr' := "MCAPI_EATTR_NUM";
+		
+		false (#incorrect attribute size# ) ==>
+			@StatusAddr' := "MCAPI_EATTR_SIZE";
+		
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+		
+		false (#endpoint is connected# ) ==>
+			@StatusAddr' := "MCAPI_ECONNECTED";
+		
+		false (#read only attribute# ) ==>
+			@StatusAddr' := "MCAPI_EREAD_ONLY";
+	end
+	
+end#)
+
+## Message passing
+
+transition msg_send_i
+	input Node, SendEndpoint, ReceiveEndpoint, BufferAddr, BufferSize, 
+			Priority, RequestAddr, StatusAddr
+	
+	rule
+		true ==>
+			Requests' := Requests \U {newRequest("msg_send", Node, 
+				[SendEndpoint, ReceiveEndpoint, BufferAddr, BufferSize, Priority])};
+			@RequestAddr' := getMaxRequestId() + 1; #return the request id, serves as handle
+			@StatusAddr' := "MCAPI_SUCCESS";		#Means msg is queued to send
+	end
+
+	
+	
+	errors
+		ValidStatusParam(StatusAddr) /\
+		!ValidEndpointId(SendEndpoint) \/ !ValidEndpointId(ReceiveEndpoint) ==>
+			@StatusAddr' := "MCAPI_ENOT_ENDP";
+		
+		ValidStatusParam(StatusAddr) /\
+		BufferSize > _MaxMsgSize ==>
+			@StatusAddr' := "MCAPI_EMESS_LIMIT";
+		
+		false (# no more buffers #) ==>
+			@StatusAddr' := "MCAPI_ENO_BUFFER";
+		
+		false (# no more request handles #) ==>
+			@StatusAddr' := "MCAPI_ENO_REQUEST";
+		
+		false (# out of memory #) ==>
+			@StatusAddr' := "MCAPI_ENO_MEM";
+		
+		ValidStatusParam(StatusAddr) /\
+		!ValidPriority(Priority) ==>
+			@StatusAddr' := "MCAPI_EPRIO";
+		
+		ValidStatusParam(StatusAddr) /\
+		!ValidRequestParam(RequestAddr) ==>
+			@StatusAddr' := "MCAPI_EPARAM";
+		
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+	end
+	
+end
+function ValidPriority(priority)
+	if priority >= 0 /\ priority < 1024	#TODO: what is a valid priority???
+	then true
+	else false fi
+end
+state
+	_MaxMsgSize = 100000000000 #Can't write this yet, because no constant folding: 2^64 #Config to whatever
+end
+
+#Note: model msg_send with msg_send_i + wait
+transition msg_send
+	input Node, SendEndpoint, ReceiveEndpoint, BufferAddr, BufferSize, 
+			Priority, StatusAddr
+	
+	rule
+		true ==>
+			tmp RequestAddr;
+			tmp SizeAddr;
+			tmp ResultAddr;
+			call msg_send_i(Node, SendEndpoint, ReceiveEndpoint, BufferAddr, BufferSize, 
+					Priority, RequestAddr, StatusAddr) {
+				@StatusAddr = "MCAPI_SUCCESS" ==>
+					call wait(Node, RequestAddr, SizeAddr, StatusAddr, 0(#timeout#), ResultAddr);
+				@StatusAddr != "MCAPI_SUCCESS" ==>
+					let noop = 0; #already is returning error code
+			};
+	end
+end
+
+#Model completion of non-blocking send
+daemon _finish_msg_send_i
+	
+	#msg_send's Data [SendEndpoint, ReceiveEndpoint, BufferAddr, BufferSize, Priority]
+	
+	let reqs = {req in Requests : 
+					   req_valid(req) = true 
+					/\ req_status(req) = "Pending" 
+					/\ req_type(req) = "msg_send"
+					
+					#Rule Guard
+					/\ !(
+						#Read as "and not Exists Earlier"
+						#This check is for message non-overtaking.  Messages sent from the same 
+						# endpoint to the same destination will arrive in order.
+						(\E r in Requests: 
+						   req_type(r) = "msg_send"
+						/\ req_status(r) = "Pending"
+						/\ req_valid(r)
+						/\ req_data(r).0 = req_data(req).0  #Sending from the same place
+						/\ req_data(r).1 = req_data(req).1  #and to the same place
+						/\ req_id(r) < req_id(req))			#and this one was sent first
+					)
+				}
+	
+	
+	#Some non-hygienic macros to simplify writing the rule effects (will use local value of req)
+    
+	#let SendEndp = getEndpoint(req_data(req).0) #Find the sending endpoing
+	let msgQ = getMsgQ(req_data(req).0, req_data(req).1)
+    let msgs = msgQ_msgs(msgQ) #we'll need to append to this queue (functionally)
+	let sendBuf = req_data(req).2		 #we'll find the message to send here
+	let msgSize = req_data(req).3
+	
+	rule
+		reqs != {}  #Has at least one pending request to satisfy
+		==>
+			choose req in reqs;
+			MsgQueues' := (MsgQueues \ {msgQ}) \U 
+			   		{changeMsgQ(msgQ, fifo_add(msgs, [@sendBuf, msgSize]))};
+			Requests' := ((Requests \ {req}) \U { [req.0, req.1, "Finished", req.3, req.4, req.5] })  # Change old request status to "Finished"
+                                            \U { newRequest("msg_deliver", ep_node_id(getEndpoint(req_data(req).1)),
+                                                            [req_data(req).0, req_data(req).1, req_data(req).4]) }; # Add a new delivery request
+                                                          # [SendEndpoint, ReceiveEndpoint, Priority]
+	end
+	
+	(#
+	
+	Note: We don't model sending a whole message, just the value at a single memory location.
+	If we wanted to do more, we'd have to model a fixed number of internal message buffers, then 
+	copy the message into one of those buffers (or return the out-of-buffers error).  That would be
+	done immediately.
+		
+		Hmm, so what happens immediately with a send and what doesn't?  Copying from source buf
+		to internal buf should be done after returning from send_i? But it must be claiming the
+		buffer, just not doing the copy yet?  Send_i can be done before any recv is called, so we
+		don't have to wait for a pairing. (Though if there is a recv already waiting, an 
+		optimization would be to copy straight from src to dest.)  The spec acts like there will
+		be buffering, but if there is no internal buffering, then a send_i would not be done 
+		until it copied the msg into the matching recv's buffer.
+	
+	Non-overtaking:
+	We are modeling message non-overtaking by making sure that messages sent from the same
+	endpoint are added to endpoint queues in the order of the send calls, i.e. in order of their 
+	request id.
+	
+	#)
+	
+end
+
+transition msg_recv_i
+	input Node, RecvEndp, BufferAddr, BufferSize, RequestAddr, StatusAddr
+	
+	rule
+		true ==>
+			Requests' := Requests \U {newRequest("msg_recv", Node, 
+			   		[RecvEndp, BufferAddr, BufferSize])};
+			@RequestAddr' := getMaxRequestId() + 1; #return the request id, serves as handle
+			@StatusAddr' := "MCAPI_SUCCESS";		#Means recv_i is queued, no data yet
+	end
+		
+	errors
+		ValidStatusParam(StatusAddr) /\
+		!ValidEndpointId(RecvEndp) ==>
+			@StatusAddr' := "MCAPI_ENOT_ENDP";
+				
+		# QUESTION: How would it know before the message is paired?
+		# ANSWER: In cases where there is a msg waiting an implementation could pair immediately.
+		# Note: It would make sense if 'wait' could return this, but status is returned immediately
+		#   and wait does not list this as a possible error message. msg_recv does, but it would 
+		#   happen if this call gave that error before calling wait...
+		false (# message size exceeds BufferSize #) ==>
+			@StatusAddr' := "MCAPI_ETRUNCATED";
+		
+		false (# no more request handles #) ==>
+			@StatusAddr' := "MCAPI_ENO_REQUEST";
+		
+		ValidStatusParam(StatusAddr) /\
+		!ValidRequestParam(RequestAddr) \/ !ValidBufferParam(BufferAddr)  ==>
+			@StatusAddr' := "MCAPI_EPARAM";
+		
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+		
+		#Can only receive on an endpoint created by the current Node.
+		#Note: if "node" = process, then threads in the process share endpoints.
+		#QUESTION: which error message should we use for this?
+		ValidStatusParam(StatusAddr) /\
+		ep_node_id(getEndpoint(RecvEndp)) != getNodeId(Node) ==>
+			@StatusAddr' := "MCAPI_ENOT_ENDP";
+	end
+
+
+end
+#Note: model msg_recv with msg_recv_i + wait
+transition msg_recv
+	input Node, ReceiveEndpoint, BufferAddr, BufferSize, RecvSizeAddr, StatusAddr
+	#TODO: RecvSizeAddr is filled with the "actual size of the message received"
+	
+	rule
+		true ==>
+			tmp RequestAddr;
+			tmp ResultAddr;
+			call msg_recv_i(Node, ReceiveEndpoint, BufferAddr, BufferSize, 
+					RequestAddr, StatusAddr) {
+				@StatusAddr = "MCAPI_SUCCESS" ==>
+					call wait(Node, RequestAddr, RecvSizeAddr, StatusAddr, 0(#timeout#), ResultAddr);
+				@StatusAddr != "MCAPI_SUCCESS" ==>
+					let nop = 0; #already is returning error code
+			};
+	end
+	
+	#Errors are those from msg_recv_i and wait. We could also check message size vs buffer size to 
+	# give a MCAPI_ETRUNCATED error, but if recv is literally recv_i + wait this won't occur.
+end
+
+#model completion of non-blocking recv
+daemon _finish_msg_recv_i
+	
+	#Some non-hygienic macros to help with rules.  Will use local value of req.
+	# Note: used in both rule effects and building the "reqs" set.
+	let recvBuf = req_data(req).1
+	let recvBufSize = req_data(req).2
+		
+	#msg_recv's Data [ReceiveEndpoint, BufferAddr, BufferSize]
+	let reqs = {req in Requests : 
+					   req_valid(req) = true 
+					/\ req_status(req) = "Pending" 
+					/\ req_type(req) = "msg_recv"
+					
+                    #Rule Guard
+                    /\ (
+						# Make sure there's a message delivery waiting for this receive
+						(\E r in Requests: 
+						   req_type(r) = "msg_deliver"
+						/\ req_status(r) = "Pending"
+						/\ req_valid(r)
+						/\ req_data(r).1 = req_data(req).0)  #Receiving on the same endpoint
+					)
+                    
+					#Rule Guard
+					/\ !(
+						#Read as "and not exists earlier"
+						#Pair send-recv in order, ie first one reading from an endp gets first 
+						#  message from endp queue
+						(\E r in Requests: 
+						   req_type(r) = "msg_recv"
+						/\ req_status(r) = "Pending"
+						/\ req_valid(r)
+						/\ req_data(r).0 = req_data(req).0  #Receiving on the same endpoint
+						/\ req_id(r) < req_id(req))		 #and this one was registered first
+					)
+			   }
+	
+	#TODO: copy whole msg works if the C wrapper packs it into the one address location sent accross
+	# Otherwise we have to allow pointer arithmetic and be smarter about what memory locations go 
+	# back and forth, how they map to physical memory, etc. (Note that we can still automatically 
+	# generate the wrappers by looking for "BufferAddr" + "BufferSize" combos to know when a seq. of
+	# bytes should be packed into one variable.)
+	#TODO: also, we should be checking message size vs buffer size.  We can't give an error here, 
+	# (which I think is a mistake of MCAPI's spec) but we should truncate the message to fit the 
+	# recv buffer's size. --> DONE
+	
+	rule
+		reqs != {} # has at least one request/delivery pair to process
+		==>
+			choose req in reqs;
+            let dreqs = {dreq in Requests : 
+                           req_valid(dreq) = true 
+                        /\ req_status(dreq) = "Pending" 
+                        /\ req_type(dreq) = "msg_deliver"
+                        /\ req_data(dreq).1 = req_data(req).0 # Deliver to chosen receive endpoint
+                   };
+            choose dreq in dreqs;            
+            let msgQ = getMsgQ(req_data(dreq).0, req_data(dreq).1);
+            let msgs = msgQ_msgs(msgQ); #we'll need to remove from this queue (functionally)
+            # let Endp = getEndpoint(req_data(dreq).0);
+            # let EndpQueue = ep_msgs(Endp);
+			let msg = fifo_next(msgs);
+			@recvBuf' := truncate(msg.0, recvBufSize);  #copy msg
+			MsgQueues' := (MsgQueues \ {msgQ}) \U 
+			   		{changeMsgQ(msgQ, fifo_remove(msgs))}; #remove msg from queue
+			Requests' := ((Requests \ {req}) \ {dreq}) \U { 
+					[req.0, req.1, "Finished", req.3, req.4, 
+						[(req.5).0, 
+						 (req.5).1, 
+						 #Change the size to the actual message size, so we can report it
+						 min(recvBufSize, msg.1)]] 
+				};
+	end
+end
+
+
+## Non-blocking operations
+
+
+transition wait
+	input Node, RequestAddr, SizeAddr, StatusAddr, Timeout, ResultAddr
+	
+	let req = getRequest(@RequestAddr)
+	
+	rule
+		req_type(req) \notin {"msg_send","msg_recv"} /\ req_status(req) = "Finished" ==>
+			@ResultAddr' := true;
+			@StatusAddr' := "MCAPI_SUCCESS";
+			Requests' := (Requests \ {req});
+		
+		
+		# For Send / Recv, we also respond with the buffer size specified
+		req_type(req) = "msg_send" /\ req_status(req) = "Finished" ==>
+			@SizeAddr' := req_data(req).3; #request has the message size here
+			@ResultAddr' := true;
+			@StatusAddr' := "MCAPI_SUCCESS";
+			Requests' := (Requests \ {req});
+		
+		req_type(req) = "msg_recv" /\ req_status(req) = "Finished" ==>
+			@SizeAddr' := req_data(req).2; #the size in the req was updated to actual message size
+			@ResultAddr' := true;
+			@StatusAddr' := "MCAPI_SUCCESS";
+			Requests' := (Requests \ {req});
+	end
+	
+	errors
+		ValidStatusParam(StatusAddr) /\
+		!hasRequest(@RequestAddr) ==>
+			@StatusAddr' := "MCAPI_ENOTREQ_HANDLE";
+			@ResultAddr' := false;
+		
+		ValidStatusParam(StatusAddr) /\
+		req_status(req) = "Canceled" ==>
+			@StatusAddr' := "MCAPI_EREQ_CANCELED";
+			@ResultAddr' := false;
+		
+		ValidStatusParam(StatusAddr) /\
+		Timeout != "MCAPI_INFINITE" /\ false (# timeout #) ==>
+			@StatusAddr' := "MCAPI_EREQ_TIMEOUT";
+			@ResultAddr' := false;
+		
+		ValidStatusParam(StatusAddr) /\
+		SizeAddr = 0 ==>
+			@StatusAddr' := "MCAPI_EPARAM";
+			@ResultAddr' := false;
+		
+		!ValidStatusParam(StatusAddr) ==>
+			ErrorStatus' := "MCAPI_EPARAM"; #Can't actually report this...
+			@ResultAddr' := false;
+	end
+end
+
+

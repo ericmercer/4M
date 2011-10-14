@@ -1,0 +1,22 @@
+#! /bin/bash
+
+## USAGE: script-name [-r | -t | -p | -s] spec.rktd threads.rktd [sigma.rktd]
+## CONFIG: you can edit the paths below as needed
+
+
+#http://www.ufoot.org/more/howto/bashbasename
+dirname()
+{
+  local dir="${1%${1##*/}}"
+  
+  #Inside fsrun on Windows the directory includes the script name!
+  dir=${dir%runmodel}
+  
+  if [ "${dir:=./}" != "/" ] ; then
+    dir=${dir%?}
+  fi
+  echo "$dir"
+}
+toself=$(dirname $0)
+
+gracket $toself/../src/model/fspec-tool.rkt $@

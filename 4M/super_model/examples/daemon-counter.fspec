@@ -1,0 +1,38 @@
+state
+	counter = 0
+	action = "" # action to process
+end
+
+transition inc
+	rule
+		action = "" ==> action' := "inc";
+	end
+end
+
+transition dec
+	rule
+		action = "" ==> action' := "dec";
+	end
+end
+
+# End each thread with this, so it won't
+# quit before the daemon processes all 
+# its actions.
+transition wait
+	rule
+		action = "" ==>
+			action' := action; #no-op
+	end
+end
+
+daemon _do
+	rule
+		action = "inc" ==>
+			   counter' := counter + 1;
+			/\ action' := "";
+		action = "dec" ==>
+			   counter' := counter - 1;
+			/\ action' := "";
+	end
+end
+

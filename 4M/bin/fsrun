@@ -1,0 +1,981 @@
+#! /usr/bin/php -n
+<?php
+/**
+*	@author Everett Morse
+*	(c) 2010 Brigham Young University
+*	
+*	This tool takes a scenario file, determins if the API spec needs to be compiled and does so if 
+*	needed, produces a threads and possibly a sigma file, then passes all of those into the Redex
+*	model with the Run, Trace, or Step mode.
+*	
+*	Tests/counter.scenario is an example of scenario file syntax.  Here is a brief explanation:
+*	This is a scenario file to run through the full model-based tool. It serves as an example of the
+*	syntax for scenario files. Everything before the : is the label.  Special labels are API, which 
+*	gives the path to the FSpec specification of the API; Mode, which is either Run, Trace, or Step;
+*	Store, which gives initial values in the store (sigma_0) using address literal = value; and 
+*	Print, which just prints a message before running the scenario, and is intended to indicate 
+*	expected value(s). Thread labels can be anything else. Label + newline means all the following 
+*	lines apply to that label until another label is given.  Another : after the label means 
+*	defining thread-local variables that will be  replaced in the call parameters. If a variable is 
+*	initialized to an address literal, that gets added to the sigma_0 with a value of 0.
+*	
+*	Compiled spec and scenario components are stored in the same location as the original files, 
+*	named with a dot in front (hidden file) and ".TYPE.rktd" as the extension.  
+*	E.g. counter.scenario + counter.fspec -> ".counter.threads.rktd", ".counter.sigma.rktd", and 
+*	".counter.fspec.rktd".
+*/
+
+//CONFIG - change these here
+ini_set('error_reporting', E_ALL);
+if( strtoupper (substr(PHP_OS, 0,3)) == 'WIN' )  {
+	define('SCRIPT_EXE','bash '); //use this on windows, since we need to specify script interpretter
+	define('PATH_SEP', '\\');
+} else {
+	define('SCRIPT_EXE',''); //use this on a unix system, since the scripts are executable
+	define('PATH_SEP', '/'); //supposedly this works on Windows too, but maybe not...?
+}
+
+//OPTIONS - set via command-line flags
+$DEBUG = false;
+$NO_WARN = false;
+$FORCE_COMPILE = false;
+$QUIET = false;
+$SUPERMODEL = null;
+
+//State
+$hasExprInArgs = false; //if true, must output threads as continuation transitions
+
+//LAUNCH
+main();
+
+
+/**
+ * Driver
+ */
+function main() {
+	global $argv, $DEBUG, $NO_WARN, $FORCE_COMPILE, $QUIET, $SUPERMODEL;
+	$name = array_shift($argv); //remove prgm name
+	$mode = null;	//may be overload what the scenario says w/ cmd  line
+	
+	while( substr($argv[0], 0, 1) == '-' ) {
+		$opt = substr($argv[0], 1);
+		for($i = 0; $i < strlen($opt); $i++) {
+			switch(substr($opt,$i,1)) {
+				case 'h':
+					echo "Usage: $name [options] <scenario file>\n";
+					echo "Options:\n";
+					echo "\t-h      Print this help message\n";
+					echo "\t-d      Enable debug messages\n";
+					echo "\t-q      Don't print scenario messages\n";
+					echo "\t-m MODE Use this mode, ignoring scenario's setting.\n";
+					echo "\t          MODE is one of: Run, Trace, Step, Print\n";
+					echo "\t-n      Don't stop if FSpec compiler gives warnings\n";
+					echo "\t-f      Run FSpec compiler even if compiled file is not out of sync\n";
+					echo "\t-s -S   Do (s) or do not (S) use the 'super model' when possible.\n";
+					exit;
+					break;
+				case 'd':
+					$DEBUG = true;
+					break;
+				case 'q':
+					$QUIET = true;
+					break;
+				case 'n':
+					$NO_WARN = true;
+					break;
+				case 'f':
+					$FORCE_COMPILE = true;
+					break;
+				case 'm':
+					array_shift($argv);
+					$mode = $argv[0];
+					if( !in_array($mode, array('Run', 'Step', 'Trace', 'Print')) ) {
+						echo "Unknown mode: \"$mode\"\n";
+						die(-1);
+					}
+					break;
+				case 's':
+					$SUPERMODEL = true;
+					break;
+				case 'S':
+					$SUPERMODEL = false;
+					break;
+				default:
+					echo "ERROR: unknown option '$opt'.  Use -h to see a list of allowed options.\n";
+					die(-1);
+			}
+		}
+		array_shift($argv);	//remove this arg
+	}
+	
+	if( count($argv) != 1 ) {
+		echo "Usage: $name [options] <scenario file>\n";
+		die(-1);
+	}
+	$file = $argv[0];
+	
+	//Read scenario
+	if( $DEBUG ) echo "Reading scenario...\n";
+	$scenario = parseScenario(file_get_contents($file));
+	
+	//Check and compile fspec
+	$scenario->apiPath = dirname($file) . '/' . $scenario->apiPath;	//make relative to scenario
+	if( $scenario->apiPath != "" && file_exists($scenario->apiPath) ) {
+		//Make the new name (and path)
+		$compiledPath = dirname($scenario->apiPath) .'/.'. 
+				basename($scenario->apiPath, ".fspec") . '.fspec.rktd';
+		
+		if( $FORCE_COMPILE ||
+			!file_exists($compiledPath) || 
+			filemtime($compiledPath) < filemtime($scenario->apiPath) 
+		) {
+			//Not compiled or out of sync -- invoke fspecc
+			$fspecc = dirname(__FILE__) . PATH_SEP . 'fspecc';
+			$output = array();
+			$retval = 0;
+			$cmd = escapeshellcmd(SCRIPT_EXE . $fspecc) . " -t redex -o " 
+					. escapeshellarg($compiledPath) . " " 
+					. escapeshellarg($scenario->apiPath) 
+					. " 2>&1"; //pipe stderr to stdout so we see it
+			
+			if( $DEBUG ) echo "Running compiler:\n$cmd\n";
+			exec($cmd, $output, $retval);
+			
+			if( $retval != 0 ) {
+				echo "ERROR: Compilation failed with the following output:\n";
+				echo "----------------------------\n";
+				echo implode("\n", $output) . "\n";
+				echo "----------------------------\n";
+				die(-1);
+			} else if( !$NO_WARN && count($output) != 0 ) {
+				echo "FSpec compiler had ". count($output) ." warnings:\n";
+				echo "----------------------------\n";
+				echo implode("\n", $output) . "\n";
+				echo "----------------------------\n";
+				die(-1);
+			}
+		}
+		$scenario->specPath = $compiledPath;
+	} else {
+		echo "ERROR: cannot find FSpec API specification for scenario\n";
+	}
+	
+	//Go through the scenario and take care of addresses, local variables, and sigma_0
+	handleSigma($scenario);
+	
+	//Output compiled Threads and Sigma files for the scenario
+	global $hasExprInArgs;
+	if( $hasExprInArgs )
+		$threads = makeThreadsWithContTrans($scenario->threads);
+	else
+		$threads = makeThreads($scenario->threads);
+	$sigma = makeSigma($scenario->sigma);
+	//echo "Threads:\n$threads\n\nSigma:\n$sigma\n";
+	
+	$prefix = dirname($file) .PATH_SEP.'.'. basename($file, ".scenario");
+	if( $DEBUG ) echo "Writing threads file...\n";
+	$scenario->threadPath = $prefix . '.threads.rktd';
+	file_put_contents($scenario->threadPath, $threads."\n");
+	
+	if( count($scenario->sigma) != 0 ) {
+		//Only output if there are bindings
+		if( $DEBUG ) echo "Writing sigma_0 file...\n";
+		$scenario->sigmaPath = $prefix . '.sigma.rktd';
+		file_put_contents($scenario->sigmaPath, $sigma."\n");
+	}
+	
+	//Print messages
+	if( !$QUIET ) {
+		foreach($scenario->print as $msg) {
+			echo "$msg\n";
+		}
+		if( count($scenario->print) != 0 )
+			echo "\n";
+	}
+	
+	//Run the model tool
+	if( $SUPERMODEL === true )
+		$tool = dirname(__FILE__) . PATH_SEP .'runsupermodel';
+	else
+		$tool = dirname(__FILE__) . PATH_SEP . 'runmodel';
+	
+	if( $mode === null )
+		$mode = $scenario->mode;	//none specified by user, so use scenario's default
+	$flag = "";
+	switch($mode) {
+		case 'Run':
+			//faster to use the super model for running, but it doesn't implement the other features.
+			if( $SUPERMODEL !== false )
+				$tool = dirname(__FILE__) . PATH_SEP . 'runsupermodel';
+			$flag = " -r"; 
+			break;
+		case 'Trace': $flag = " -t"; break;
+		case 'Step':  $flag = " -s"; break;
+		case 'Print': $flag = " -p"; break;
+	}
+	
+	$cmd = escapeshellcmd(SCRIPT_EXE . $tool);
+	$cmd .= $flag;
+	$cmd .= " " . escapeshellarg($scenario->specPath);
+	$cmd .= " " . escapeshellarg($scenario->threadPath);
+	if( $scenario->sigmaPath != "" )
+		$cmd .= " " . escapeshellarg($scenario->sigmaPath);
+	
+	$retval = 0;
+	if( $DEBUG ) echo "Running scenario:\n$cmd\n";
+	passthru($cmd, $retval);
+	if( $retval != 0 ) {
+		echo "ERROR: execution of model failed.\n";
+		die(-1);
+	}
+}
+
+/**
+ * Parse a scenario file and give back the scenario object.
+ */
+function parseScenario($data) {
+	$scenario = new Scenario();
+	
+	$state = 0;
+	$label = "";
+	$sigma = array();
+	$vars = array();
+	$lineno = 0;
+	foreach(explode("\n", $data) as $line) {
+		$lineno++;
+		$c = 0;
+		$line = trim($line);
+		if( $line == "")
+			continue;//skip empty line
+		
+		foreach(preg_split("//", $line) as $char) {
+			if( $char == "" ) continue;	//split adds empty elements to beginning and end
+			$c++;
+			//echo "lineno=$lineno, c=$c, char=$char, state=$state\n";
+			switch($state) {
+				case 0:		//Looking for label
+					if( $char == '#' )
+						break 2;	//skip rest of line
+					else if( $char == ':' ) {
+						//echo "Parsing line $lineno: have label \"$label\"\n";
+						if( $label == "" ) {
+							echo "ERROR: missing label on line $lineno\n";
+							die(-1);
+						} else if( $label == "API" ) {
+							$scenario->apiPath = trim(substr($line, $c));
+							$label = "";
+							break 2; //done with this line
+						} else if( $label == "Mode" ) {
+							$scenario->mode = trim(substr($line, $c));
+							if( !in_array($scenario->mode, array('Run', 'Trace', 'Step')) ) {
+								echo "ERROR: invalid mode on line $lineno: {$scenario->mode}\n";
+								die(-1);
+							}
+							$label = "";
+							break 2; //done with this line
+						} else if( $label == "Store" ) {
+							$sigma = array_merge($sigma, parseAssign(substr($line, $c), $lineno));
+							$label = "";
+							break 2;
+						} else if( $label == "Print" ) {
+							$scenario->print[] = trim(substr($line, $c));
+							$label = "";
+							break 2;
+						} else {
+							//Not a special label, so look for thread command
+							//echo "Have label \"$label\", lineno=$lineno, c=$c, line=\"$line\"\n";
+							$state = 1;
+						}
+					} else {
+						//Otherwise add label char (WS has been stripped from the front already)
+						$label .= $char;
+					}
+					break;
+				case 1:		//Looking for thread command 
+					//echo "in state 1, char=$char, c=$c\n";
+					if( $char == ':' ) {
+						//Read in thread local vars
+						if( !isset($vars[$label]) )
+							$vars[$label] = array();
+						$vars[$label] = array_merge($vars[$label], parseAssign(substr($line, $c), $lineno));
+						$state = 0;	//looking for label again on next line
+						$label = "";
+						break 2;
+					} else if( $char == ' ' || $char == '\t' ) {
+						break; //skip whitespace
+					}
+					
+					if( !isset($scenario->threads[$label]) )
+						$scenario->threads[$label] = array();
+					//echo "Before parse command, line=\"$line\", c=$c\n";
+					$scenario->threads[$label][] = parseCommand(substr($line,$c-1), $lineno);
+					$state = 0;	//looking for label again on next line
+					$label = "";
+					break 2;
+				case 2:			//Looking for commands without needing a new label
+					if( $char == ' ' || $char == '\t' )
+						break;	//skip whitespace
+					else if( $char == '#' )
+						break 2;	//skip rest of line
+					else if( $char == ':' ) {
+						//Read in thread local vars
+						if( !isset($vars[$label]) )
+							$vars[$label] = array();
+						$vars[$label] = array_merge($vars[$label], parseAssign(substr($line, $c), $lineno));
+						break 2;
+					} else if( strpos($line, ':') !== false ) {
+						//There's a collon and it's not the first non-WS char, so we have a label
+						$label = $char; //starts with this
+						$state = 0;		//looks for label
+						break;
+					}
+					
+					//Otherwise read command from this line (and stay with this label)
+					if( !isset($scenario->threads[$label]) )
+						$scenario->threads[$label] = array();
+					$scenario->threads[$label][] = parseCommand(substr($line,$c-1), $lineno);
+					break 2;
+			}//end switch char
+		}//end reading a line
+		if( $state == 0 && $label != "" ) {
+			echo "ERROR: could not find label in line $lineno: \"$label\"\n";
+			die(-1);
+		} else if( $state == 1 ) {
+			$state = 2;	//look for commands on subsequent lines
+		}
+	}//end reading all lines
+	
+	$scenario->vars = $vars;
+	$scenario->tmpSigma = $sigma;
+	return $scenario;
+}
+
+/**
+ * Finds max used sigma address in the spec, then goes through all the variable
+ * usages in threads to replace and builds the sigma_0 to avoid conflicting with
+ * the spec.
+ * IMPORTANT: This must be run after the spec has been compiled.
+ * NOTE: parsing hides it's $vars and $sigma variables in $scenario.  $vars is a 
+ * map of thread to map of var->value.
+ */
+function handleSigma(Scenario $scenario) {
+	$vars = $scenario->vars; //unpack hidden value from parsing.
+	$sigma = $scenario->tmpSigma;
+	unset($scenario->vars);
+	unset($scenario->tmpSigma);
+	
+	
+	//Discover offset to avoid sigma's defined in spec
+	$specAddrOffset = 0;
+	$matches = array();
+	$count = preg_match_all(
+		"/#\|addr\|# (\d+)/",
+		file_get_contents($scenario->specPath),
+		$matches,
+		PREG_PATTERN_ORDER //$matches[0] is all, $matches[1] is array of matches to first group, etc.
+	);
+	if( $count === false ) {
+		echo "ERROR: failed to search spec for max sigma address\n";
+		die(-1);
+	} else if( $count > 0 ) {
+		$list = $matches[1];
+		rsort($list);	//put largest on top
+		$specAddrOffset = $list[0] + 1;
+	}
+	if( $GLOBALS['DEBUG'] ) echo "** Offset from spec sigma = $specAddrOffset\n";
+	
+	//Double check to see if we even need to scoot
+	if( $specAddrOffset != 0 ) {
+		$minUsedAddr = false;
+		foreach($vars as $list) {
+			foreach($list as $name => $value) {
+				if( $value instanceof Address )
+					if($minUsedAddr === false || $value->addr < $minUsedAddr)
+						$minUsedAddr = $value->addr;
+			}
+		}
+		foreach($sigma as $addr => $val) {
+			$addr = substr($addr,1);
+			if($minUsedAddr === false || $addr < $minUsedAddr)
+				$minUsedAddr = $addr;
+		}
+		if( $minUsedAddr >= $specAddrOffset ) {
+			$specAddrOffset = 0;	//our lowest is no lower than the first allowable value.
+			if( $GLOBALS['DEBUG'] ) echo "** No sigma collisions, so offset reset to 0\n";
+		}
+	}
+	
+	//Go through thread local vars to add any address literal references to the sigma
+	foreach($vars as $list) {
+		foreach($list as $name => $value) {
+			if( $value instanceof Address ) {
+				if( !isset($sigma['@'.$value->addr]) )
+					$sigma['@'.$value->addr] = new Constant(0); //if not initialized in sigma, do so
+				$value->addr += $specAddrOffset; //set this so when we replace thread locals it's right
+			}
+		}
+	}
+	
+	//Build Sigma map starting after maximum address value used in the API spec
+	foreach($sigma as $addr => $val) {
+		if( substr($addr, 0, 1) != '@' ) {
+			echo "ERROR: invalid address literal in initial Store \"$addr\" => \"$val\"\n";
+			die(-1);
+		}
+		$addr = substr($addr,1);
+		if( !is_numeric($addr) ) {
+			echo "ERROR: invalid address literal in initial Store \"$addr\" => \"$val\"\n";
+			die(-1);
+		}
+		//if($GLOBALS['DEBUG']) {echo "saving addr $addr\n";}
+		if( $addr >= 0 )
+			$addr += $specAddrOffset;	//move to not conflict with API spec
+		$scenario->sigma[$addr] = $val;
+	}
+	
+	//Replace thread local variables as constants into calls
+	foreach($scenario->threads as $name => $commands) {
+		if( isset($vars[$name]) && count($vars[$name]) != 0 ) {
+			//Has some vars to replace, so run through and do it
+			replaceThreadVars($commands, $vars[$name]);
+		}
+	}
+}
+
+/**
+ * Replaces the usage of all variables with the right value.
+ */
+function replaceThreadVars($commands, $vars) {
+	foreach($commands as $cmd) {
+		if( is_array($cmd->params) ) {
+			foreach($cmd->params as &$param) {
+				$param = withoutVars($param, $vars);
+			}
+		}
+	}
+}
+//Returns new value
+function withoutVars($expr, $vars) {
+	if( $expr instanceof Constant ) {
+		return $expr;	//nothing to do
+	} elseif( $expr instanceof Variable ) {
+		if( isset($vars[$expr->name]) ) {
+			if( $expr->deref )
+				return new Op('@', $vars[$expr->name]);
+			else
+				return $vars[$expr->name];
+		} else {
+			echo "ERROR: unbound identifier: \"{$expr->name}\"\n";
+			die(-1);
+		}
+	} else if( $expr instanceof Address ) {
+		return $expr;
+	} else if( $expr instanceof ValueList ) {
+		$newlist = array();
+		foreach($expr->values as $val) {
+			$newlist[] = withoutVars($val, $vars);
+		}
+		return new ValueList($expr->type, $newlist);
+	} else {
+		echo "ERROR: parameter is not a valid expression: \"$expr\"\n";
+		die(-1);
+	} 
+}
+
+/**
+ * Writes the parenthetical form of threads.
+ * 
+ * Form is (all in the "ck" command continuation term):
+ * ((call a (x y) ->
+ *   (call b (z) -> 
+ *    ret))
+ *  (call m (p) ->
+ *   (call n (q) ->
+ *    ret)))
+ * 
+ * It is a list of ck's, one per thread, and must end in ret.
+ * 
+ * @return string
+ */
+function makeThreads($threads) {
+	$out = "(";
+	$indent = 1;
+	
+	$firstThread = true;
+	$toClose = "";
+	$toDec = 0;
+	foreach($threads as $commands) {
+		if( !$firstThread ) {
+			$out .= "\n" . indent($indent);
+		}
+		/*$out .= "(";
+		$indent++;
+		
+		$out .= "mt";
+		$out .= "\n" . indent($indent);
+		$out .= "ret";
+		$out .= "\n" . indent($indent); - done automatically*/
+		
+		$hasPrev = false;
+		foreach($commands as $cmd) {
+			if( $hasPrev ) {
+				$out .= "\n" . indent($indent);
+			}
+			$out .= "(";
+			$indent++;
+			
+			$out .= "call " . $cmd->transition . "(";
+			$sep = "";
+			if( is_array($cmd->params) ) {
+				foreach($cmd->params as $param) {
+					$out .= $sep . makeExpr($param);
+					$sep = " ";
+				}
+			}
+			$out .= ")";
+			
+			//$indent--;
+			//$out .= ")";
+			$out .= " -> ";
+			$toClose .= ")";
+			$toDec += 1;
+			$hasPrev = true;
+		}
+		
+		$indent--;
+		$indent -= $toDec;
+		$out .= "ret" . $toClose;
+		$firstThread = false;
+		$toClose = ""; //reset
+		$toDec = 0; //reset
+	}
+	
+	$out .= ")";
+	return $out;
+}
+
+/**
+ * Writes the parenthetical form of threads, except that it does so by creating continuation 
+ * transitions and just calling the first one. This is necessary if any calls need to evaluate 
+ * expressions first. (Any non-constant exprs that need to be evaluated after the prev. call.)
+ * 
+ * Form is:
+ * ('mu-extend
+ *  (trans ...)
+ *  (call $scenario_t0_0 () -> ret)
+ *  (call $scenario_t1_0 () -> ret))
+ * 
+ * Each trans it like:
+ *  (transition $scenario_t0_0 () ((true (call/k f (x y) $scenario_t0_1 ()))))
+ * or
+ *  (transition $scenario_t0_0 () ((true (tail-call f (x y)))))
+ * 
+ * @return string
+ */
+function makeThreadsWithContTrans($threads) {
+	$out =  "(mu-extend\n";
+	$out .= " (";
+	$indent = 2;
+	
+	$threadStarters = "";
+	$hasPrev = false;
+	$tid = 0;
+	$exprIndex = 0;
+	foreach($threads as $commands) {
+		$cid = 0;
+		$lastCid = count($commands) - 1;
+		foreach($commands as $cmd) {
+			if( $hasPrev ) {
+				$out .= "\n" . indent($indent);
+			}
+			$hasPrev = true;
+			
+			$out .= "(transition \$scenario_t{$tid}_{$cid} () ((true ";
+			$out .= "("; //start cmd list
+			$let = "";
+			if( $cid == $lastCid )
+				$call = "(tail-call ";
+			else
+				$call = "(call/k ";
+			$call .= "{$cmd->transition} (";
+			$sep = "";
+			if( is_array($cmd->params) ) {
+				foreach($cmd->params as $param) {
+					if( $param instanceof Op ) {
+						if( $let == "" )
+							$let = "(let (";
+						else
+							$let .= "\n" . indent($indent) . "      ";
+						$name = "\$expr" . ($exprIndex++);
+						$let .= "[$name ".makeExpr($param)."]";
+						$call .= $sep . $name;
+					} else
+						$call .= $sep . makeExpr($param);
+					$sep = " ";
+				}
+			}
+			if( $let != "" )
+				$let .= "))\n" . indent($indent);
+			$out .= "{$let}{$call})";
+			if( $cid != $lastCid )
+				$out .= " \$scenario_t{$tid}_".($cid+1)." ()";
+			$out .= ")))))";
+			
+			$cid++;
+		}
+		
+		$indent--;
+		if( $tid != 0 )
+			$threadStarters .= "\n";
+		$threadStarters .= " (call \$scenario_t{$tid}_0 () -> ret)";
+		$tid++;
+	}
+	
+	$out .= ")\n";
+	$out .= "$threadStarters)";
+	return $out;
+}
+
+
+/**
+ * Writes the parenthetical form of sigma_0
+ * @return string
+ */
+function makeSigma($sigma) {
+	//Sigma is:
+	//  empty | (sigma [address -> value])	
+	//It must be sorted by address value, smallest to greatest.
+	//Note that all keys are numbers at this point
+	//if($GLOBALS['DEBUG']) {echo "sigma:\n"; var_dump($sigma);}
+	ksort($sigma);
+	
+	$out = "mt"; //initially empty
+	foreach($sigma as $addr => $val) {
+		$out = "($out [$addr -> ". makeExpr($val) ."])";
+	}
+	return $out;
+}
+
+function indent($indent) {
+	switch($indent) {
+		case 0: return "";
+		case 1: return " ";
+		case 2: return "  ";
+		case 3: return "   ";
+		default:
+			$s = "";
+			while($indent > 0) {
+				$indent--;
+				$s .= " ";
+			}
+			return $s;
+	}
+}
+
+function makeExpr($expr) {
+	if( $expr instanceof Constant )
+		return $expr->value;	//number, string, "true", or "false"
+	if( $expr instanceof ValueList ) {
+		$vals = implode(' ', array_map("makeExpr", $expr->values));
+		if( $expr->type == '{' )
+			return "(const-set $vals)";
+		else
+			return "(const-tuple $vals)";
+	}
+	if( $expr instanceof Address ) {
+		return "(addr ".$expr->addr.")";
+	}
+	if( $expr instanceof Op ) {
+		return "({$expr->op} " . 
+				makeExpr($expr->operands[0]) . 
+				(count($expr->operands) == 2? ' '.makeExpr($expr->operands[1]) : '') .
+				")";
+	}
+	echo "ERROR: can't encode this expr as a constant value:\n";
+	var_dump($expr);
+	die(-1);
+}
+
+
+//////////////////////////////// LL(1) COMMAND PARSER //////////////////////
+
+/**
+ * Parse a line for A = B comma-separated assignments.
+ * @returns array mapping id/address -> value.
+ */
+function parseAssign($line, $lineno) {
+	$map = array();
+	
+	$assigns = explode(',', $line);
+	foreach($assigns as $pair) {
+		$pair = trim($pair);
+		if( $pair != "" ) {
+			$parts = explode('=', $pair);
+			if( count($parts) == 2 ) {
+				$key = trim($parts[0]);
+				$val = trim($parts[1]);
+				//The value part needs to be turned into a value
+				$line = preg_split("//",$val);
+				array_shift($line);	//the first elem is always ""
+				$val = parseValue($line, $lineno);
+				
+				$map[$key] = $val;
+			} else {
+				echo "ERROR on line $lineno: invalid assigment \"$line\"";
+				die(-1);
+			}
+		}
+	}
+	
+	return $map;
+}
+
+/**
+ * Parses in a command for a thread.
+ * The grammar for this is:
+ * 	command: id '(' expr_list? ')'
+ *	expr_list: value (',' value)*
+ *	value: number, quoted_string, set, tuple, "true", "false", addr, id
+ *	addr: '@' number
+ *	set: '{' expr_list? '}'
+ *	tuple: '[' expr_list? ']'
+ * 
+ * We use a few helper functions to parse this in an LL(1) fashion.
+ * @return Command
+ */
+function parseCommand($line, $lineno) {
+	//echo "Will read command from: $line\n";
+	$line = preg_split("//",trim($line));
+	$cmd = new Command();
+	//print_r($line);
+	
+	$cmd->transition = parseId($line, $lineno);
+	
+	//-- Make sure to append $ to kernel-lang keywords, since FSpec compiler does this --
+	$reserved = array("set", "addr", "int", "union", "tuple", "deset", "setBuild",
+			"setFilter", "id");
+	if( in_array($cmd->transition, $reserved) ) {
+		$cmd->transition .= "$";
+	}
+	//-- --
+	
+	//echo "Read id {$cmd->transition} at line $lineno\n";
+	consume('(', $line, $lineno);
+	if( !isChar(')', $line) )
+		$cmd->params = parseExprList($line, $lineno);
+	consume(')', $line, $lineno);
+	
+	return $cmd;
+}
+//Note: used to parse identifiers, but also numbers and booleans.
+//Therefore separators are () {} [] which are used around calls, sets, and tuples, and they are 
+//whitespace and a couple other special chars, but allow other symbols, numbers, etc.
+//@returns string
+function parseId(&$line, $lineno) {
+	$id = "";
+	$separators = array(')', '(', '{', '}', '[', ']', ';', '@', ':', ',', ' ', '\t', '\n');
+	while( count($line) != 0 && !in_array($line[0], $separators) ) {
+		$id .= $line[0];
+		array_shift($line);
+	}
+	return $id;
+}
+//@returns array of values
+function parseExprList(&$line, $lineno) {
+	$values = array();
+	while( count($line) != 0 ) {
+		if( isChar(')', $line) )
+			return $values;
+		if( isChar(',', $line) ) {
+			$linestr = implode('', $line);
+			echo "ERROR on line $lineno: expected value, found comma in \"$linestr\"\n";
+			die(-1);
+		}
+		$values[] = parseValue($line, $lineno);
+		if( isChar(',', $line) )
+			consume(',', $line, $lineno);	//eat it and keep going
+		else
+			break;	//no comma, so must be done
+	}
+	return $values;
+}
+//@returns value
+function parseValue(&$line, $lineno) {
+	if( isChar('{', $line) )
+		return parseSet($line, $lineno);
+	if( isChar('[', $line) )
+		return parseTuple($line, $lineno);
+	if( isChar('"', $line) )
+		return parseString($line, $lineno);
+	if( isChar('@', $line) )
+		return parseAddrOrDeref($line, $lineno);
+	
+	$thing = parseId($line, $lineno);
+	if( is_numeric($thing) )
+		return new Constant($thing);
+	else if( $thing == 'true' || $thing == 'false' )
+		return new Constant($thing);
+	else
+		return new Variable($thing);	//is an id
+}
+//@returns Address or Variable
+function parseAddrOrDeref(&$line, $lineno) {
+	consume('@', $line, $lineno);
+	$addr = parseId($line, $lineno);
+	if( is_numeric($addr) )
+		return new Address($addr);
+	else
+		return new Variable($addr, true);
+}
+//@returns Address
+function parseAddr(&$line, $lineno) {
+	consume('@', $line, $lineno);
+	$addr = parseId($line, $lineno);
+	if( !is_numeric($addr) ) {
+		echo "ERROR on line $lineno parsing thread command, expected address, got \"$addr\"\n";
+		die(-1);
+	}
+	return new Address($addr);
+}
+//@returns ValueList
+function parseSet(&$line, $lineno) {
+	consume('{', $line, $lineno);
+	$val = new ValueList('{', parseExpList());
+	consume('}', $line, $lineno);
+	return $val;
+}
+//@returns ValueList
+function parseTuple(&$line, $lineno) {
+	consume('[', $line, $lineno);
+	$val = new ValueList('[', parseExpList());
+	consume(']', $line, $lineno);
+	return $val;
+}
+//@returns Constant
+function parseString(&$line, $lineno) {
+	$str = "";
+	consume('"', $line, $lineno);
+	while( count($line) != 0 && $line[0] != '"' ) {
+		if( $line[0] == '\\' ) {
+			array_shift($line);	//consume backslash
+			$str .= "\\" . array_shift($line);	//escaped char (may be double quote)
+		} else
+			$str .= array_shift($line);	//consume and add to string
+	}
+	consume('"', $line, $lineno);
+	
+	return new Constant('"' . $str . '"');
+}
+
+function consume($char, &$line, $lineno) {
+	consumeWS($line);
+	if( count($line) == 0 || $line[0] != $char ) {
+		$linestr = implode($line);
+		echo "ERROR on line $lineno parsing thread command at \"$linestr\", expected \"$char\"\n";
+		die(-1);
+	}
+	array_shift($line);
+}
+//@returns boolean
+function isChar($char, &$line) {
+	consumeWS($line);
+	if( count($line) != 0 && $line[0] == $char )
+		return true;
+	else
+		return false;
+}
+function consumeWS(&$line) {
+	while( count($line) != 0 && ($line[0] == ' ' || $line[0] == '\t') ) {
+		array_shift($line);
+	}
+}
+
+
+
+
+//////////////////////////// CLASSES /////////////////////////////////
+
+/**
+ * Object to hold info about a scenario.
+ */
+class Scenario
+{
+	//Data from scenario file
+	public $apiPath = "";
+	public $threads = array();
+	public $sigma = array();
+	public $mode = "Run";
+	public $print = array();
+	
+	//Data from compilation processes
+	public $specPath;
+	public $threadPath;
+	public $sigmaPath;
+}
+
+/**
+ * Object to hold info about a command (API call).
+ */
+class Command
+{
+	public $transition;
+	public $params;
+}
+/**
+ * Represents a constant value that could be a command parameter.
+ */
+class Constant
+{
+	public $value;
+	public function __construct($value) { $this->value = $value; }
+}
+/**
+ * Represents a variable used in a command, which will be replaced later.
+ */
+class Variable
+{
+	public $name;
+	public $deref;
+	public function __construct($name, $deref = false) { $this->name = $name;$this->deref = $deref;}
+}
+/**
+ * Represents an address literal passed to a command, which will be 
+ * handled later, since it has to be put in the sigma in a way to not 
+ * conflict with the API spec's use of sigma.
+ */
+class Address
+{
+	public $addr;
+	public function __construct($value) { $this->addr = $value; }
+}
+/**
+ * Represents either a set or a tuple
+ */
+class ValueList
+{
+	public $type;
+	public $values;
+	public function __construct($type, $values) {
+		$this->type = $type;
+		$this->values = $values;
+	}
+}
+/**
+ * Represents an operation
+ */
+class Op
+{
+	public $op;
+	public $operands;
+	public function __construct($op, $and1, $and2 = null) {
+		global $hasExprInArgs;
+		
+		$this->op = $op;
+		$this->operands = array($and1);
+		if( $and2 !== null )
+			$this->operands[] = $and2;
+		
+		$hasExprInArgs = true; //any use of this class means we have an expression
+	}
+}
+?>
