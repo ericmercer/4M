@@ -230,7 +230,31 @@ void mcapi_get_endpoint_i(
    MCAPI_OUT mcapi_request_t* request,
    MCAPI_OUT mcapi_status_t* mcapi_status
 ) {
-	printf("MCAPI>> Not implemented (%s:%d)\n", __FILE__, __LINE__);
+  //printf("MCAPI>> Not implemented (%s:%d)\n", __FILE__, __LINE__);
+  gem_value status, request_val;
+  char status_buf[64] = {0};
+  int result_id, result_buf = 0;
+
+  GEM_DEBUG(buildMsg());
+  
+  maybe_out_param(&status, mcapi_status, status_buf, sizeof(status_buf));
+  maybe_out_param(&request_val, request, request, sizeof(mcapi_request_t));
+  result_id = registerVariable(&result_buf, sizeof(result_buf));
+
+  gem_call("get_endpoint_i (%d %d %d %V %V %v)",
+           threadID(),
+           node_id,
+           port_id, 
+           status,
+           request_val,
+           result_id);
+
+  *mcapi_status = err_name_to_code(status_buf);
+  
+  GEM_DEBUG(retMsg());
+
+  deleteVariable(result_id);
+  deleteVariable(status.data.val);
 }
 
 mcapi_endpoint_t mcapi_get_endpoint(

@@ -1,0 +1,18 @@
+# ignore any emacs temp files
+*~
+
+# ignore all bin dirs
+!4M/bin # don't ignore this dir, there are useful scripts in here
+GEM/bin
+mcapi-1.0/bin
+mcapi-2.0/bin
+toy-mcapi/bin
+
+# ignore all obj dirs
+4M/obj
+GEM/obj
+mcapi-1.0/obj
+mcapi-2.0/obj
+
+# ignore ther dirs
+4M/compiler/generated

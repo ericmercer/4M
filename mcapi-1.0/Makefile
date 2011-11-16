@@ -9,8 +9,9 @@ GEM_SRC = $(GEM_PATH)/src
 GEM_INC = $(GEM_PATH)/inc
 GEM_LIB = $(GEM_PATH)/lib
 GEM_BIN = $(GEM_PATH)/bin
-4M_COMPILER=../4M/obj/compiler
-FSPECC = ../4M/bin/fspecc
+4M_PATH = ../4M
+4M_COMPILER=$(4M_PATH)/obj/compiler
+FSPECC = $(4M_PATH)/bin/fspecc
 SPEC_PATH=mcapi.fspec
 SPEC_COMPILED=.mcapi.fspec.rktd
 INCS=-I$(GEM_PATH)/ -I$(GEM_LIB)/ -I$(GEM_INC)/ -I$(SRC)/
@@ -25,7 +26,7 @@ CFILES+= $(GEM_SRC)/gem_posix.c
 CFLAGS+= -D_GNU_SOURCE -D_XOPEN_SOURCE
 endif
 
-all: selfsend twosends tophscen nonblocking $(SPEC_COMPILED) gemDriver leader
+all: selfsend twosends tophscen nonblocking gemDriver $(SPEC_COMPILED) leader
 
 clean:
 	make -C $(GEM_PATH) clean
@@ -70,7 +71,7 @@ $(SPEC_COMPILED): 4mCompiler $(SPEC_PATH)
 
 4mCompiler: $(4M_COMPILER)/FSpecCompiler.class
 $(4M_COMPILER)/FSpecCompiler.class:
-	make -C ../4M/Makefile
+	$(MAKE) --directory=$(4M_PATH)/Makefile
 	#@echo ERROR: The MCAPI FSpec needs the FSpec compiler to be built first.
 	#exit 1
 

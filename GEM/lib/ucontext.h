@@ -23,13 +23,17 @@
 #ifndef _SYS_UCONTEXT_H
 #define UCONTEXT_H
 
+#if defined(__WINDOWS__) || defined(_WINDOWS) || defined(_Windows)
 #include <windows.h>
+
 
 typedef struct __stack {
 	void *ss_sp;
 	size_t ss_size;
 	int ss_flags;
 } stack_t;
+
+#endif
 
 typedef CONTEXT mcontext_t;
 typedef unsigned long __sigset_t;
