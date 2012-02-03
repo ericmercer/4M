@@ -32,13 +32,6 @@ clean:
 	make -C $(GEM_PATH) clean
 	rm -f bin/*
 
-
-test: all
-	./selfsend
-	./twosends
-	./tophscen
-	./nonblocking
-
 ordertest: $(CFILES) $(EXAMPLES)/ordertest.c
 	$(CC) $(CFLAGS) $(INCS) $^ -o $(BIN)/$@
 
@@ -64,6 +57,9 @@ jp: $(CFILES) $(EXAMPLES)/jp_mp.c
 	$(CC) -O0 $(CFLAGS) $(INCS) $^ -o $(BIN)/$@
 
 router: $(CFILES) $(EXAMPLES)/router.c
+	$(CC) -O0 $(CFLAGS) $(INCS) $^ -o $(BIN)/$@
+
+completerouter: $(CFILES) $(EXAMPLES)/completerouter.c
 	$(CC) -O0 $(CFLAGS) $(INCS) $^ -o $(BIN)/$@
 
 $(SPEC_COMPILED): 4mCompiler $(SPEC_PATH)

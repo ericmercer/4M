@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 #include "gem.h"
 #include "mcapi.h"
@@ -82,7 +83,7 @@ void action(void *param) {
 
             if ((myVal == 0) && (INT(recvBuf) == 1)) {
                 active = 0;
-                printf("[%d] is going inactive.\n", tid);
+                printf("[%ld] is going inactive.\n", tid);
             }
         } else {
             mcapi_msg_recv(me, recvBuf, bufSize, &recvSize, &status);

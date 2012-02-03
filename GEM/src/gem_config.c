@@ -11,8 +11,8 @@ static unsigned int gemSeedVal;
 static unsigned int gemSeedIsSet;
 static unsigned int gemUseDummyServer;
 // TODO - What should these default paths be?
-static char * apiSpecPath = "spec.rktd";
-static char * serverPath = "gem-server.rkt";
+static char * apiSpecPath = "../mcapi-1.0/.mcapi.fspec.rktd";
+static char * serverPath = "src/gem-server.rkt";
 
 static void strToUpper(char * str) {
     while (*str && *str != '=') {
@@ -81,7 +81,9 @@ void read_gem_config_file() {
                 strncpy(apiSpecPath, c, len);
                 //apiSpecPath[len-1] = '\0';
                 apiSpecPath[len] = '\0';
-                printf("API spec Path: %s\n", apiSpecPath);
+                if (len > 1 && apiSpecPath[len-1] == '\n')
+                    apiSpecPath[len-1] = '\0';
+                printf("API spec Path: `%s`\n", apiSpecPath);
                 break;
             case 'G': // GEM (Racket) server path
                 c = eatWhitespace(strchr(line, '=')+1);

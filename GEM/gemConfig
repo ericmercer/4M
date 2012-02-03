@@ -1,3 +1,8 @@
-mode=SINGLE
-debug=OFF
-#seed=35AE
+mode=EXHAUSTIVE
+debug=ON
+#SEED=77f5
+#SEED=ddb3
+SEED=279D
+#cachedData=ON
+#gem server path=./src/gem-server.rkt
+#api path=/home/noonan/fourmgit/4M/mcapi-1.0/.mcapi.fspec.rktd
