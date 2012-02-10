@@ -1,5 +1,8 @@
 CC=gcc
-CFLAGS=-g -Wall -Wno-deprecated-declarations
+# We need to fix the UCONTEXT issue. On Mac OSX Lion, _SYS_UCONTEXT_H is not defined, 
+# so the system includes the structure definitions in ucontext.h causing conflicts 
+# with existing system files.
+CFLAGS=-g -Wall -Wno-deprecated-declarations -D_SYS_UCONTEXT_H
 
 SRC = src
 BIN = bin

@@ -2,7 +2,6 @@
 *~
 
 # ignore all bin dirs
-!4M/bin # don't ignore this dir, there are useful scripts in here
 GEM/bin
 mcapi-1.0/bin
 mcapi-2.0/bin
@@ -14,5 +13,8 @@ GEM/obj
 mcapi-1.0/obj
 mcapi-2.0/obj
 
-# ignore ther dirs
+# ignore other directions
 4M/compiler/generated
+wrapperInput
+wrapperOutput
+compiled
