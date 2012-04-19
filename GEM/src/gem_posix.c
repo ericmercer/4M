@@ -12,7 +12,9 @@
 static int serverPid;
 
 FILE ** start_server_process(void) {
-    char rktPath[] = "/usr/bin/racket";
+	//path to default: /usr/bin/racket
+	//path to nightly build: "/home/noonan/racket-5.2.1.7/bin/racket"
+    char rktPath[] = "/home/noonan/racket-5.2.1.7/bin/racket";
     FILE ** serverIO = malloc(sizeof(FILE*)*2);
     int ppid,i;
 	int pipeIn[2], pipeOut[2];

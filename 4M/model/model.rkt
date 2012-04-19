@@ -1,6 +1,6 @@
 #lang racket
-(require redex/reduction-semantics
-         (only-in unstable/match ==))
+(require redex/reduction-semantics)
+         ;(only-in unstable/match ==))
 (provide (all-defined-out))
 
 ; -----------------------------------------------------

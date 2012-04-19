@@ -38,6 +38,9 @@ ordertest: $(CFILES) $(EXAMPLES)/ordertest.c
 selfsend: $(CFILES) $(EXAMPLES)/selfsend.c
 	$(CC) $(CFLAGS) $(INCS) $^ -o $(BIN)/$@
 
+selfsend2: $(CFILES) $(EXAMPLES)/selfsend2.c
+	$(CC) $(CFLAGS) $(INCS) $^ -o $(BIN)/$@
+
 twosends: $(CFILES) $(EXAMPLES)/twosends.c
 	$(CC) $(CFLAGS) $(INCS) $^ -o $(BIN)/$@
 

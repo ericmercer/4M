@@ -46,7 +46,7 @@ TODO LIST
 #define NUM_CARS                       4
 #define NUM_DRIVERS                    4
 #define NUM_SEATS                       3
-#define NUM_VISITORS                (NUM_SEATS*15)
+#define NUM_VISITORS                (NUM_SEATS*1)
 #define MAX_IN_PARK                    20
 #define MAX_TICKETS                      (NUM_CARS*NUM_SEATS)
 #define MAX_IN_MUSEUM               5

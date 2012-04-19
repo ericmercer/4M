@@ -493,6 +493,8 @@ void gem_format_call(char **resultMsg, char *fmt, va_list ap) {
 	*resultMsg = msg;
 }
  
+//this is key. 
+
 void gem_call(char* fmt, ...) {
 	char *msg;
 	
