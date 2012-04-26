@@ -1,5 +1,6 @@
 #lang racket
-(require redex/reduction-semantics "model.rkt")
+(require redex/reduction-semantics
+         "model.rkt")
 
 #|
 (define-syntax-rule (test-term-equal lhs rhs)
