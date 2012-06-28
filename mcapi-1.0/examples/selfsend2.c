@@ -21,7 +21,7 @@ void t0(void * arg) {
     
     ep0 = mcapi_create_endpoint(1000,&status);
     printf("Got ep0=%d, status=%d (%s)\n", ep0, status, err_code_to_name(status));
-    ep1 = mcapi_get_endpoint(0, 2000,&status);
+    ep1 = mcapi_get_endpoint(1, 2000,&status);
     printf("Got ep1=%d, status=%d (%s)\n", ep1, status, err_code_to_name(status));
     
     mcapi_msg_send(ep0, ep1, "Hello", 6, 0, &status);
@@ -36,7 +36,7 @@ void t1(void * arg){
 	mcapi_version_t vers;
 	mcapi_status_t status;
 	size_t size;
-	mcapi_initialize(0, &vers, &status);
+	mcapi_initialize(1, &vers, &status);
 	ep1 = mcapi_create_endpoint(2000,&status);
 	mcapi_msg_recv(ep1, response, RESPONSE_BUFFER_SIZE, &size, &status);
 	printf("Received %u bytes. status=%d (%s)\n", (unsigned int)size, status, err_code_to_name(status));

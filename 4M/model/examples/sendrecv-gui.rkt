@@ -9,7 +9,7 @@
 (define visited?
   (make-hash-visited?))
 
-(traces
+#;(traces
  machine-reductions
  initial-term
  #:pred (λ (t) (not (state->ABC t)))
@@ -18,6 +18,6 @@
  (λ (t name)
    (not (visited? t))))
 
-#;(stepper
+(stepper
  machine-reductions
  initial-term fspec-pp)

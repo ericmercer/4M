@@ -25,7 +25,7 @@ void t1_body(void*);
 void t2_body(void*);
 
 int main(int argc, char * argv[]) {
-	printf("Possible outcomes are:\nA = X, B = Y\nA = Y, B = X\n");	
+	//printf("Possible outcomes are:\nA = X, B = Y\nA = Y, B = X\n");	
 
     // Create threads
     create_gem_thread(t0_body, 0);
